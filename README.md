@@ -4,7 +4,7 @@
 Welcome! This is a simple python application that will allow
 you to search for a tail number from a past flight. So far, this
 application only supports domestic flights taken over 3 months ago
-(and as far back as 1993).
+(and as far back as 1995).
 You will need:
 
 **(a)** The flight number
