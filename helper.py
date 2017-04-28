@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import lxml
 import re
 
+
 __author__ = "Akhil Tandon"
 __copyright__ = "(c) 2016"
 
@@ -15,7 +16,7 @@ __license__ = "GPL"
 __version__ = "1.0"
 
 
-def get_csv(carrier, origin, date):
+def get_bts(carrier, origin, date):
     """
     Posts a request to BTS by parsing carrier, origin, and date and retrieves a CSV
 
@@ -31,10 +32,27 @@ def get_csv(carrier, origin, date):
     """
 
     # BTS website to collect CSV
-    bts = 'https://1bts.rita.dot.gov/xml/ontimesummarystatistics/src/dstat/OntimeSummaryDepaturesDataCSV.xml'
+
+    bts = 'https://www.transtats.bts.gov/ONTIME/Departures.aspx'
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/52.0.2743.116 Safari/537.36"
+    }
+
+    # Create requests session
+    s = requests.Session()
+    r = s.get(bts, headers=headers)
+
+    soup = BeautifulSoup(r.content, 'lxml')
+
+    viewState = soup.select_one('#__VIEWSTATE')["value"]
+    viewStateGenerator = soup.select_one('#__VIEWSTATEGENERATOR')["value"]
+    eventValidation = soup.select_one('#__EVENTVALIDATION')["value"]
 
     # Dummy data (some values required by BTS)
-    mydata = {'adtime':'Actual departure time', 'aetime':'Actual elapsed time'}
+    mydata = {'__EVENTTARGET': 'DL_CSV', '__EVENTARGUMENT': '', '__VIEWSTATE': viewState,
+              '__VIEWSTATEGENERATOR': viewStateGenerator,'__EVENTVALIDATION': eventValidation,
+              'chkStatistics$1': 1, 'chkStatistics$3': 3}
 
     # Parse the month, day, and year from the date string
     month = int(date[0:2])
@@ -43,21 +61,19 @@ def get_csv(carrier, origin, date):
 
     # Add appropriate form data from passed-in parameters
     # The dict keys are determined based on BTS form data
-    mydata['month'+str(month)]=month
-    mydata['Day'+str(day)]=day
-    mydata['year'+str(year-1994)]=year
-    mydata['airport1']=origin
-    mydata['airline']=carrier
+    mydata['chkMonths$' + str(month - 1)] = month
+    mydata['chkDays$' + str(day - 1)] = day
+    mydata['chkYears$' + str(year - 1987)] = year
+    mydata['cboAirport'] = origin
+    mydata['cboAirline'] = carrier
+    mydata['btnSubmit'] = 'Submit'
 
-    # Strip off useless BTS headers from csv
-    rawcsv = requests.post(bts,data=mydata).text
-    t1 = rawcsv.split('\n')
-    mycsv = '\n'.join(t1[15:len(t1)-2]).replace('  ','')
+    rawdata = s.post(bts, data=mydata, headers=headers).text
+    result = BeautifulSoup(rawdata, 'lxml')
+    table = result.find('table',{'id':'GridView1'})
+    df = pd.read_html(str(table),header=0)
 
-    # Strip off the last empty line
-    result = mycsv[0:len(mycsv)-1]
-
-    return result
+    return df[0]
 
 
 def get_df_from_csv(csv):
@@ -101,15 +117,12 @@ def get_nose(df, number):
     A string
     """
 
-    # Format the flight number to have leading zeroes
-    fn = str(number).zfill(4)
-
     # Check for faulty flight numbers
-    if fn not in df['Flight Number'].values:
+    if number not in df['Flight Number'].values:
         return 'Invalid Flight Number'
 
     # For the row with the specified flight number, return its tail number
-    nose = df[df['Flight Number']==fn]['Tail Number'].iloc[0]
+    nose = df[df['Flight Number'] == number]['Tail Number'].iloc[0]
 
     return nose
 
@@ -128,17 +141,17 @@ def get_fleet(fleet):
     """
 
     # Required data for the RZJets database with the value of fleet set
-    rz = {'registry':'',
-          'searchMsn':'',
-          'searchTyp':'',
-          'searchSelcal':'',
-          'fleet':fleet,
-          'opid1':'',
-          'company1':'',
-          'built':'',
-          'searchNte':'',
-          'frstatus':'any',
-          'submitB':'search'}
+    rz = {'registry': '',
+          'searchMsn': '',
+          'searchTyp': '',
+          'searchSelcal': '',
+          'fleet': fleet,
+          'opid1': '',
+          'company1': '',
+          'built': '',
+          'searchNte': '',
+          'frstatus': 'any',
+          'submitB': 'search'}
 
     # Required headers for RZJets
     h = {'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -156,7 +169,7 @@ def get_fleet(fleet):
          'User-Agent': 'Mozilla/5.0'}
 
     # Post a request to the RZJets database
-    rzjet = requests.post('http://rzjets.net/aircraft/index.php',data=rz,headers=h)
+    rzjet = requests.post('http://rzjets.net/aircraft/index.php', data=rz, headers=h)
 
     # Scrape the RJZets response
     tail = BeautifulSoup(rzjet.text, 'lxml')
@@ -167,10 +180,10 @@ def get_fleet(fleet):
     # The first <a> tag will contain the tail number
     a = tr.find('a')
 
-    return a.text
+    return a.text.encode('utf-8')
 
 
-def get_tail(flight,origin,date):
+def get_tail(flight, origin, date):
     """
     Our main function which calls our helper functions to product the tail number
 
@@ -187,19 +200,18 @@ def get_tail(flight,origin,date):
 
     # Parse carrier and flight number information
     carrier = flight[0:2]
-    number = flight[2:len(flight)]
+    number = int(flight[2:len(flight)])
 
     # Get our CSV, then DataFrame, then the nose number
-    csv = get_csv(carrier,origin,date)
-    df = get_df_from_csv(csv)
-    nose = get_nose(df,number)
+    df = get_bts(carrier, origin, date)
+    nose = get_nose(df, number)
 
     # If the BTS result follows the AA nose number scheme, we will call get_fleet
     # The nose number scheme is N followed by a number, two letters, and then finally AA
     if re.match('N\d[A-Z]{2}A{2}', nose):
         print('This is a nose number!')
         fleet = nose[1:4]
-        print('Fleet: '+fleet)
+        print('Fleet: ' + fleet)
         return get_fleet(fleet)
 
     # Otherwise we simply return the number we found above
